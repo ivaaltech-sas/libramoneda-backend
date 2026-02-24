@@ -175,6 +175,10 @@ class CreditAdmin(admin.ModelAdmin):
         if not obj.monthly_payment:
             return format_html('<em>Not calculated yet</em>')
         
+        total_aval = obj.total_aval or 0
+        total_iva_aval = obj.total_iva_aval or 0
+        total_amount = obj.total_amount or 0
+        
         html = f"""
         <table style="border-collapse: collapse; width: 100%; max-width: 600px;">
             <thead>
@@ -193,17 +197,17 @@ class CreditAdmin(admin.ModelAdmin):
                 <tr>
                     <td style="padding: 8px; border: 1px solid #ddd;">Aval</td>
                     <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.monthly_aval:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.total_aval:,.0f}</td>
+                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${total_aval:,.0f}</td>
                 </tr>
                 <tr>
                     <td style="padding: 8px; border: 1px solid #ddd;">IVA sobre Aval</td>
                     <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.monthly_iva_aval:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.total_iva_aval:,.0f}</td>
+                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${total_iva_aval:,.0f}</td>
                 </tr>
                 <tr style="background-color: #c8e6c9; font-weight: bold;">
                     <td style="padding: 8px; border: 1px solid #ddd;">CUOTA TOTAL</td>
                     <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.monthly_payment:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${obj.total_amount:,.0f}</td>
+                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${total_amount:,.0f}</td>
                 </tr>
             </tbody>
         </table>

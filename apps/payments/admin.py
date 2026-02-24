@@ -4,8 +4,41 @@ Admin configuration for Payment models
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 from django.utils.html import format_html
-from django.db.models import Sum
-from .models import Payment, PaymentStatus
+from django.db.models import Sum, Q
+from decimal import Decimal
+from datetime import date
+from .models import Payment, PaymentStatus, PaymentTransaction
+
+
+class PaymentTransactionInline(admin.TabularInline):
+    """Inline for payment transactions"""
+    model = PaymentTransaction
+    extra = 0
+    readonly_fields = [
+        'transaction_date',
+        'amount',
+        'payment_method',
+        'reference_number',
+        'applied_to_late_interest',
+        'applied_to_interest',
+        'applied_to_aval',
+        'applied_to_iva',
+        'applied_to_capital',
+        'created_at'
+    ]
+    can_delete = False
+    
+    fields = [
+        'transaction_date',
+        'amount',
+        'payment_method',
+        'reference_number',
+        'applied_to_late_interest',
+        'applied_to_interest',
+        'applied_to_aval',
+        'applied_to_iva',
+        'applied_to_capital',
+    ]
 
 
 @admin.register(Payment)
@@ -13,41 +46,51 @@ class PaymentAdmin(admin.ModelAdmin):
     """Payment admin configuration"""
     
     list_display = [
-        'payment_info',
+        'payment_number',
         'credit_link',
         'due_date',
-        'payment_deadline_display',
-        'period_days',
+        'payment_deadline',
         'scheduled_total_display',
         'paid_total_display',
         'remaining_display',
         'status_badge',
-        'days_overdue_display'
+        'days_overdue_display',
     ]
     
     list_filter = [
         'status',
         'due_date',
-        'payment_date',
+        'payment_deadline',
         'credit__credit_type',
-        'credit__customer',
     ]
     
     search_fields = [
         'credit__credit_number',
         'credit__customer__first_name',
         'credit__customer__last_name',
-        'credit__customer__identification_number',
-        'transaction_reference',
+        'credit__customer__document_number',
     ]
     
     readonly_fields = [
+        'payment_number',
+        'due_date',
+        'payment_deadline',
+        'period_days',
+        'scheduled_capital',
+        'scheduled_interest',
+        'scheduled_aval',
+        'scheduled_iva_aval',
+        'scheduled_total',
+        'balance_before',
+        'remaining_capital',
+        'remaining_interest',
+        'remaining_aval',
+        'remaining_iva',
+        'remaining_total',
+        'days_overdue',
+        'calculated_late_interest_display',
         'created_at',
         'updated_at',
-        'created_by',
-        'updated_by',
-        'payment_breakdown_display',
-        'balance_info_display',
     ]
     
     fieldsets = (
@@ -61,7 +104,10 @@ class PaymentAdmin(admin.ModelAdmin):
         (_('Dates'), {
             'fields': (
                 'due_date',
+                'payment_deadline',
                 'payment_date',
+                'period_days',
+                'days_overdue',
             )
         }),
         (_('Scheduled Amounts'), {
@@ -79,113 +125,99 @@ class PaymentAdmin(admin.ModelAdmin):
                 'paid_interest',
                 'paid_aval',
                 'paid_iva_aval',
+                'paid_late_interest',
                 'paid_total',
             )
         }),
-        (_('Payment Breakdown'), {
-            'fields': ('payment_breakdown_display',)
-        }),
-        (_('Balance Tracking'), {
+        (_('Remaining Amounts'), {
             'fields': (
-                'balance_before',
-                'balance_after',
-                'balance_info_display',
-            )
-        }),
-        (_('Late Payment'), {
-            'fields': ('late_fee',)
-        }),
-        (_('Payment Details'), {
-            'fields': (
-                'payment_method',
-                'transaction_reference',
-            )
-        }),
-        (_('Additional Information'), {
-            'fields': ('notes',)
-        }),
-        (_('Audit'), {
-            'fields': (
-                'created_at',
-                'updated_at',
-                'created_by',
-                'updated_by',
+                'remaining_capital',
+                'remaining_interest',
+                'remaining_aval',
+                'remaining_iva',
+                'remaining_total',
             ),
             'classes': ('collapse',)
         }),
+        (_('Late Interest (Mora)'), {
+            'fields': (
+                'late_interest_rate',
+                'calculated_late_interest_display',
+                'applied_late_interest',
+                'late_interest_calculated_date',
+                'late_interest_applied_date',
+            )
+        }),
+        (_('Balance'), {
+            'fields': (
+                'balance_before',
+            )
+        }),
+        (_('Additional Information'), {
+            'fields': (
+                'notes',
+            )
+        }),
     )
     
-    actions = ['mark_as_paid', 'mark_as_late']
+    inlines = [PaymentTransactionInline]
     
-    def payment_info(self, obj):
-        """Display payment number and credit"""
-        return f"Payment #{obj.payment_number}"
-    payment_info.short_description = _('Payment')
+    actions = [
+        'calculate_late_interest_preview',
+        'apply_late_interest_action',
+        'mark_as_overdue',
+    ]
     
     def credit_link(self, obj):
-        """Display clickable credit link"""
+        """Link to credit"""
         from django.urls import reverse
-        url = reverse('admin:credits_credit_change', args=[obj.credit.id])
-        return format_html(
-            '<a href="{}">{}</a>',
-            url,
-            obj.credit.credit_number
-        )
+        url = reverse('admin:credits_credit_change', args=[obj.credit.pk])
+        return format_html('<a href="{}">{}</a>', url, obj.credit.credit_number)
     credit_link.short_description = _('Credit')
     
     def scheduled_total_display(self, obj):
         """Display scheduled total"""
-        return f"${obj.scheduled_total:,.0f}"
+        formatted = f"${obj.scheduled_total:,.0f}"
+        return format_html('<span style="font-weight: bold;">{}</span>', formatted)
     scheduled_total_display.short_description = _('Scheduled')
     
     def paid_total_display(self, obj):
         """Display paid total"""
         if obj.paid_total > 0:
+            formatted = f"${obj.paid_total:,.0f}"
             return format_html(
-                '<span style="color: green; font-weight: bold;">${}</span>',
-                f'{obj.paid_total:,.0f}'  # ← Cambio aquí
+                '<span style="color: green; font-weight: bold;">{}</span>',
+                formatted
             )
-        return f"${obj.paid_total:,.0f}"
+        return '$0'
     paid_total_display.short_description = _('Paid')
     
     def remaining_display(self, obj):
         """Display remaining amount"""
-        remaining = obj.remaining_amount
+        remaining = (
+            obj.scheduled_capital - obj.paid_capital +
+            obj.scheduled_interest - obj.paid_interest +
+            obj.scheduled_aval - obj.paid_aval +
+            obj.scheduled_iva_aval - obj.paid_iva_aval +
+            obj.applied_late_interest - obj.paid_late_interest
+        )
+        
         if remaining > 0:
+            formatted = f"${remaining:,.0f}"
             return format_html(
-                '<span style="color: red;">${}</span>',
-                f'{remaining:,.0f}'  # ← Cambio aquí
+                '<span style="color: red; font-weight: bold;">{}</span>',
+                formatted
             )
-        return f"${remaining:,.0f}"
+        return format_html('<span style="color: green;">$0</span>')
     remaining_display.short_description = _('Remaining')
-    
-    def days_overdue_display(self, obj):
-        """Display days overdue"""
-        if obj.is_overdue:
-            return format_html(
-                '<span style="color: red; font-weight: bold;">{} days</span>',
-                obj.days_overdue
-            )
-        return '-'
-    days_overdue_display.short_description = _('Days Overdue')
-    
-    def payment_deadline_display(self, obj):
-        """Display payment deadline"""
-        if obj.payment_deadline and obj.payment_deadline != obj.due_date:
-            return format_html(
-                '<span style="color: #FF5722; font-weight: bold;">{}</span>',
-                obj.payment_deadline.strftime('%b %d, %Y')
-            )
-        return obj.due_date.strftime('%b %d, %Y')
-    payment_deadline_display.short_description = _('Payment Deadline')
     
     def status_badge(self, obj):
         """Display status with color badge"""
         colors = {
-            PaymentStatus.PENDING: '#FF9800',
+            PaymentStatus.PENDING: '#FFA500',
+            PaymentStatus.PARTIAL: '#FFD700',
             PaymentStatus.PAID: '#4CAF50',
-            PaymentStatus.LATE: '#F44336',
-            PaymentStatus.PARTIAL: '#FFC107',
+            PaymentStatus.OVERDUE: '#F44336',
             PaymentStatus.CANCELLED: '#9E9E9E',
         }
         color = colors.get(obj.status, 'gray')
@@ -196,130 +228,186 @@ class PaymentAdmin(admin.ModelAdmin):
         )
     status_badge.short_description = _('Status')
     
-    def payment_breakdown_display(self, obj):
-        """Display detailed payment breakdown comparison"""
-        html = """
-        <table style="border-collapse: collapse; width: 100%; max-width: 700px;">
-            <thead>
-                <tr style="background-color: #f5f5f5;">
-                    <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Concepto</th>
-                    <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Programado</th>
-                    <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Pagado</th>
-                    <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Diferencia</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td style="padding: 8px; border: 1px solid #ddd;">Capital</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px; border: 1px solid #ddd;">Interés</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px; border: 1px solid #ddd;">Aval</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                </tr>
-                <tr>
-                    <td style="padding: 8px; border: 1px solid #ddd;">IVA Aval</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                </tr>
-                <tr style="background-color: #e3f2fd; font-weight: bold;">
-                    <td style="padding: 8px; border: 1px solid #ddd;">TOTAL</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                    <td style="padding: 8px; text-align: right; border: 1px solid #ddd;">${:,.0f}</td>
-                </tr>
-            </tbody>
-        </table>
-        """.format(
-            obj.scheduled_capital,
-            obj.paid_capital,
-            obj.scheduled_capital - obj.paid_capital,
-            obj.scheduled_interest,
-            obj.paid_interest,
-            obj.scheduled_interest - obj.paid_interest,
-            obj.scheduled_aval,
-            obj.paid_aval,
-            obj.scheduled_aval - obj.paid_aval,
-            obj.scheduled_iva_aval,
-            obj.paid_iva_aval,
-            obj.scheduled_iva_aval - obj.paid_iva_aval,
-            obj.scheduled_total,
-            obj.paid_total,
-            obj.remaining_amount,
-        )
-        
-        if obj.late_fee > 0:
-            html += """
-            <p style="margin-top: 10px; color: red;">
-                <strong>Mora:</strong> ${:,.0f}
-            </p>
-            """.format(obj.late_fee)
-        
-        return format_html(html)
-    payment_breakdown_display.short_description = _('Payment Breakdown')
+    def days_overdue_display(self, obj):
+        """Display days overdue"""
+        days = obj.days_overdue
+        if days > 0:
+            return format_html(
+                '<span style="color: red; font-weight: bold;">{} days</span>',
+                days
+            )
+        return '-'
+    days_overdue_display.short_description = _('Days Overdue')
     
-    def balance_info_display(self, obj):
-        """Display balance information"""
-        balance_after_value = obj.balance_after if obj.balance_after else obj.balance_before
-        
-        html = """
-        <table style="border-collapse: collapse;">
-            <tr>
-                <td style="padding: 5px;"><strong>Saldo antes:</strong></td>
-                <td style="padding: 5px; text-align: right;">${:,.0f}</td>
-            </tr>
-            <tr>
-                <td style="padding: 5px;"><strong>Capital pagado:</strong></td>
-                <td style="padding: 5px; text-align: right; color: green;">-${:,.0f}</td>
-            </tr>
-            <tr style="border-top: 2px solid #333;">
-                <td style="padding: 5px;"><strong>Saldo después:</strong></td>
-                <td style="padding: 5px; text-align: right; font-weight: bold;">
-                    ${:,.0f}
-                </td>
-            </tr>
-        </table>
-        """.format(
-            obj.balance_before,
-            obj.paid_capital,
-            balance_after_value,
-        )
-        
-        return format_html(html)
-    balance_info_display.short_description = _('Balance Information')
+    def calculated_late_interest_display(self, obj):
+        """Display calculated late interest"""
+        calculated = obj.calculate_late_interest()
+        if calculated > 0:
+            formatted = f"${calculated:,.0f}"
+            return format_html(
+                '<span style="color: red; font-weight: bold;">{}</span>',
+                formatted
+            )
+        return '$0'
+    calculated_late_interest_display.short_description = _('Current Late Interest')
     
-    def mark_as_paid(self, request, queryset):
-        """Mark selected payments as paid"""
-        from datetime import date
-        updated = 0
+    # Actions
+    
+    def calculate_late_interest_preview(self, request, queryset):
+        """Calculate and preview late interest without applying"""
+        total_late_interest = Decimal('0')
+        results = []
+        
         for payment in queryset:
-            if payment.status != PaymentStatus.PAID:
-                payment.paid_capital = payment.scheduled_capital
-                payment.paid_interest = payment.scheduled_interest
-                payment.paid_aval = payment.scheduled_aval
-                payment.paid_iva_aval = payment.scheduled_iva_aval
-                payment.paid_total = payment.scheduled_total
-                payment.payment_date = date.today()
-                payment.status = PaymentStatus.PAID
-                payment.save()
-                updated += 1
+            if payment.status in [PaymentStatus.OVERDUE, PaymentStatus.PARTIAL]:
+                calculated = payment.calculate_late_interest()
+                if calculated > 0:
+                    total_late_interest += calculated
+                    results.append(
+                        f"Payment #{payment.payment_number} ({payment.credit.credit_number}): "
+                        f"${calculated:,.0f} ({payment.days_overdue} days overdue)"
+                    )
         
-        self.message_user(request, f"{updated} payments marked as paid.")
-    mark_as_paid.short_description = _("Mark selected payments as paid")
+        if results:
+            message = "Late interest preview:\n" + "\n".join(results)
+            message += f"\n\nTotal late interest: ${total_late_interest:,.0f}"
+            self.message_user(request, message)
+        else:
+            self.message_user(request, "No overdue payments found", level='WARNING')
     
-    def mark_as_late(self, request, queryset):
-        """Mark selected payments as late"""
-        updated = queryset.filter(status=PaymentStatus.PENDING).update(status=PaymentStatus.LATE)
-        self.message_user(request, f"{updated} payments marked as late.")
-    mark_as_late.short_description = _("Mark selected payments as late")
+    calculate_late_interest_preview.short_description = "Preview late interest (no changes)"
+    
+    def apply_late_interest_action(self, request, queryset):
+        """Apply late interest to selected payments"""
+        count = 0
+        total_applied = Decimal('0')
+        
+        for payment in queryset:
+            if payment.status in [PaymentStatus.OVERDUE, PaymentStatus.PARTIAL, PaymentStatus.PENDING]:
+                if payment.days_overdue > 0:
+                    calculated = payment.apply_late_interest()
+                    if calculated > 0:
+                        total_applied += calculated
+                        count += 1
+        
+        if count > 0:
+            self.message_user(
+                request,
+                f"Applied late interest to {count} payment(s). Total: ${total_applied:,.0f}"
+            )
+        else:
+            self.message_user(request, "No overdue payments to apply late interest", level='WARNING')
+    
+    apply_late_interest_action.short_description = "Apply late interest to selected payments"
+    
+    def mark_as_overdue(self, request, queryset):
+        """Mark pending payments past deadline as overdue"""
+        today = date.today()
+        updated = queryset.filter(
+            Q(payment_deadline__lt=today) | Q(due_date__lt=today),
+            status=PaymentStatus.PENDING
+        ).update(status=PaymentStatus.OVERDUE)
+        
+        self.message_user(request, f"Marked {updated} payment(s) as overdue")
+    
+    mark_as_overdue.short_description = "Mark as overdue"
+
+
+@admin.register(PaymentTransaction)
+class PaymentTransactionAdmin(admin.ModelAdmin):
+    """Payment transaction admin configuration"""
+    
+    list_display = [
+        'transaction_date',
+        'payment_link',
+        'amount_display',
+        'payment_method',
+        'reference_number',
+        'breakdown_display',
+    ]
+    
+    list_filter = [
+        'payment_method',
+        'transaction_date',
+    ]
+    
+    search_fields = [
+        'payment__credit__credit_number',
+        'reference_number',
+        'payment__credit__customer__document_number',
+    ]
+    
+    readonly_fields = [
+        'payment',
+        'transaction_date',
+        'amount',
+        'payment_method',
+        'reference_number',
+        'applied_to_late_interest',
+        'applied_to_interest',
+        'applied_to_aval',
+        'applied_to_iva',
+        'applied_to_capital',
+        'total_applied',
+        'created_at',
+        'updated_at',
+    ]
+    
+    fieldsets = (
+        (_('Transaction Details'), {
+            'fields': (
+                'payment',
+                'transaction_date',
+                'amount',
+                'payment_method',
+                'reference_number',
+            )
+        }),
+        (_('Application Breakdown'), {
+            'fields': (
+                'applied_to_late_interest',
+                'applied_to_interest',
+                'applied_to_aval',
+                'applied_to_iva',
+                'applied_to_capital',
+                'total_applied',
+            )
+        }),
+        (_('Notes'), {
+            'fields': ('notes',)
+        }),
+    )
+    
+    def payment_link(self, obj):
+        """Link to payment"""
+        from django.urls import reverse
+        url = reverse('admin:payments_payment_change', args=[obj.payment.pk])
+        return format_html(
+            '<a href="{}">{} - Payment #{}</a>',
+            url,
+            obj.payment.credit.credit_number,
+            obj.payment.payment_number
+        )
+    payment_link.short_description = _('Payment')
+    
+    def amount_display(self, obj):
+        """Display amount"""
+        formatted = f"${obj.amount:,.0f}"
+        return format_html(
+            '<span style="color: green; font-weight: bold;">{}</span>',
+            formatted
+        )
+    amount_display.short_description = _('Amount')
+    
+    def breakdown_display(self, obj):
+        """Display payment breakdown"""
+        parts = []
+        if obj.applied_to_late_interest > 0:
+            parts.append(f"Mora: ${obj.applied_to_late_interest:,.0f}")
+        if obj.applied_to_interest > 0:
+            parts.append(f"Int: ${obj.applied_to_interest:,.0f}")
+        if obj.applied_to_capital > 0:
+            parts.append(f"Cap: ${obj.applied_to_capital:,.0f}")
+        
+        return " | ".join(parts) if parts else "-"
+    breakdown_display.short_description = _('Breakdown')

@@ -84,6 +84,14 @@ class InterestRateConfig(models.Model):
         help_text=_('Calculated monthly base interest rate (e.g., 1.88 for 1.88%)')
     )
     
+    late_interest_rate = models.DecimalField(
+        _('late interest rate'),
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal('1.89'), #ESTO HAY QUE VALIDARLO
+        help_text=_('Monthly late payment interest rate (e.g., 3.00 for 3%)') #ESTO HAY QUE VALIDARLO
+    )
+    
     # Aval Rates
     aval_rate_libranza = models.DecimalField(
         _('aval rate - libranza'),

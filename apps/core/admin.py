@@ -14,23 +14,27 @@ class InterestRateConfigAdmin(admin.ModelAdmin):
     list_display = [
         'period',
         'usury_rate_display',
-        'base_interest_rate',
+        'base_interest_rate_display',
+        'late_interest_rate_display',  # ← AGREGADO
         'effective_date',
         'is_active_badge',
         'created_at'
     ]
+    
     list_filter = [
         'is_active',
         'year',
         'effective_date',
         'created_at'
     ]
+    
     search_fields = [
         'year',
         'month',
         'notes'
     ]
-    readonly_fields = ['created_at', 'updated_at', 'created_by']
+    
+    readonly_fields = ['created_at', 'updated_at', 'created_by', 'base_interest_rate']  # ← base_interest_rate es readonly
     
     fieldsets = (
         (_('Period'), {
@@ -40,12 +44,13 @@ class InterestRateConfigAdmin(admin.ModelAdmin):
                 'effective_date'
             )
         }),
-        (_('Usury Rate'), {
+        (_('Interest Rates'), {
             'fields': (
                 'usury_rate',
-                'base_interest_rate'
+                'base_interest_rate',  # ← Auto-calculado (readonly)
+                'late_interest_rate',  # ← AGREGADO (editable)
             ),
-            'description': 'Base interest rate will be auto-calculated if left empty'
+            'description': 'Base interest rate will be auto-calculated from usury rate'
         }),
         (_('Aval Rates'), {
             'fields': (
@@ -81,15 +86,32 @@ class InterestRateConfigAdmin(admin.ModelAdmin):
     
     def usury_rate_display(self, obj):
         """Display usury rate with color"""
-        # ⭐ Formatear el número PRIMERO
         rate_text = f"{float(obj.usury_rate):.2f}%"
-        
-        # Luego pasar el texto ya formateado a format_html
         return format_html(
             '<span style="background-color: #FF9800; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}</span>',
             rate_text
         )
     usury_rate_display.short_description = _('Usury Rate')
+    
+    def base_interest_rate_display(self, obj):
+        """Display base interest rate"""
+        if obj.base_interest_rate:
+            rate_text = f"{float(obj.base_interest_rate):.4f}%"
+            return format_html(
+                '<span style="background-color: #2196F3; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}</span>',
+                rate_text
+            )
+        return '-'
+    base_interest_rate_display.short_description = _('Base Rate')
+    
+    def late_interest_rate_display(self, obj):
+        """Display late interest rate (mora)"""
+        rate_text = f"{float(obj.late_interest_rate):.2f}%"
+        return format_html(
+            '<span style="background-color: #F44336; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}</span>',
+            rate_text
+        )
+    late_interest_rate_display.short_description = _('Late Rate')
     
     def is_active_badge(self, obj):
         """Display active status with badge"""
@@ -101,3 +123,9 @@ class InterestRateConfigAdmin(admin.ModelAdmin):
             '<span style="background-color: #9E9E9E; color: white; padding: 3px 10px; border-radius: 3px;">Inactivo</span>'
         )
     is_active_badge.short_description = _('Status')
+    
+    def save_model(self, request, obj, form, change):
+        """Set created_by on creation"""
+        if not change:  # Creating new object
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)

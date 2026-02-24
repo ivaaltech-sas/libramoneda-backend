@@ -1,6 +1,8 @@
 """
 Credit models for Libramoneda platform
 """
+from datetime import timedelta
+
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.utils.translation import gettext_lazy as _
@@ -27,6 +29,7 @@ class CreditStatus(models.TextChoices):
     ACTIVE = 'ACTIVE', _('Active')
     PAID = 'PAID', _('Paid Off')
     DEFAULTED = 'DEFAULTED', _('Defaulted')
+    PAID_OFF = 'PAID_OFF', _('Paid Off')
     CANCELLED = 'CANCELLED', _('Cancelled')
 
 
@@ -392,13 +395,14 @@ class Credit(AuditableModel):
         
         return f'CR-{year}-{new_number:05d}'
 
-    def pmt(self, principal: Decimal, rate_percent: Decimal, n: int) -> Decimal:
+    def pmt(self, principal: Decimal, rate: Decimal, n: int) -> Decimal:
         """
         Cálculo PMT (sistema francés)
         rate_percent: tasa mensual en porcentaje (ej: 1.82 para 1.82%)
         """
-        rate = rate_percent / Decimal('100')  # Convertir a decimal
-        
+        print(f"Calculating PMT with principal={principal}, rate_percent={rate}, n={n}")
+        # rate = rate_percent / Decimal('1000')  # Convertir a decimal
+        print(f"Converted rate to decimal: {rate}")
         if rate == 0:
             return (principal / Decimal(n)).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
         
@@ -420,9 +424,9 @@ class Credit(AuditableModel):
         i0 = self.base_interest_rate / Decimal('100')  # ej: 1.88% -> 0.0188
         i_aval = self.aval_rate / Decimal('100')  # ej: 7.05% -> 0.0705
         iva = self.iva_rate / Decimal('100')  # ej: 19% -> 0.19
-        
+        print(f"DEBUG: Calculating payments with P={P}, n={n}, i0={i0}, i_aval={i_aval}, iva={iva}")
         # CRITICAL: Tasa total = base + aval (como en build_schedule)
-        i1 = i0 + i_aval  # ej: 0.0188 + 0.0705 = 0.0893
+        i1 = i_aval  # ej: 0.0188 + 0.0705 = 0.0893
         
         # 1. Cuota base (solo interés base)
         pay_base = self.pmt(P, i0, n)
@@ -443,11 +447,11 @@ class Credit(AuditableModel):
         payment_monthly = (pay_base + aval_monthly + iva_aval_monthly).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
         self.monthly_payment = payment_monthly
         
-        # 6. Totales
-        self.total_aval = aval_monthly * n
-        self.total_iva_aval = iva_aval_monthly * n
-        self.total_amount = payment_monthly * n
-        self.total_interest = self.total_amount - P - self.total_aval - self.total_iva_aval
+        # # 6. Totales
+        # self.total_aval = aval_monthly * n
+        # self.total_iva_aval = iva_aval_monthly * n
+        # self.total_amount = payment_monthly * n
+        # self.total_interest = self.total_amount - P - self.total_aval - self.total_iva_aval
 
     def generate_payment_schedule(self):
         """
@@ -584,14 +588,15 @@ class Credit(AuditableModel):
                 next_year = year
             
             last_day = monthrange(next_year, next_month)[1]
+            fecha_inicial_k = prev_final + timedelta(days=1)
             fecha_final_k = date(next_year, next_month, last_day)
             
             # Calculate payment deadline
             deadline = self._calculate_payment_deadline(fecha_final_k, company_payment_day)
             
             # Calculate days in this period
-            dias_k = (fecha_final_k - prev_final).days
-            
+            dias_k = (fecha_final_k - fecha_inicial_k).days
+            print(f"dias_k {dias_k} for payment {k} (fecha_final_k {fecha_final_k}, fecha_inicial_k {fecha_inicial_k})")
             saldo_inicial_k = saldo
             
             # Interest for this payment
@@ -630,10 +635,40 @@ class Credit(AuditableModel):
         
         # Bulk create
         Payment.objects.bulk_create(payments)
-        
+        self.update_totals_from_schedule()
+
         print(f"✓ Generated {len(payments)} payments")
         print(f"First payment: {fecha_final_1} (deadline: {first_deadline}, {dias_total_1} days)")
         return payments
+    
+    def update_totals_from_schedule(self):
+        """Recalculate totals based on generated payment schedule"""
+        payments = self.payments.all()
+        
+        total_capital = Decimal('0')
+        total_interest = Decimal('0')
+        total_aval = Decimal('0')
+        total_iva_aval = Decimal('0')
+        total_amount = Decimal('0')
+
+        for p in payments:
+            total_capital += p.scheduled_capital
+            total_interest += p.scheduled_interest
+            total_aval += p.scheduled_aval
+            total_iva_aval += p.scheduled_iva_aval
+            total_amount += p.scheduled_total
+
+        self.total_aval = total_aval
+        self.total_iva_aval = total_iva_aval
+        self.total_amount = total_amount
+        self.total_interest = total_interest
+
+        self.save(update_fields=[
+            'total_aval',
+            'total_iva_aval',
+            'total_amount',
+            'total_interest'
+        ])
     
     def _calculate_payment_deadline(self, due_date, company_payment_day=None):
         """
@@ -726,3 +761,83 @@ class Credit(AuditableModel):
     def is_paid_off(self):
         """Check if credit is fully paid"""
         return self.balance <= 0 or self.status == CreditStatus.PAID
+
+    @property
+    def has_overdue_payments(self):
+        """Verificar si tiene pagos vencidos"""
+        return self.payments.filter(
+            status__in=['OVERDUE', 'PARTIAL']
+        ).exists()
+    
+    @property
+    def max_days_overdue(self):
+        """Calcular la mora máxima de todos los pagos"""
+        max_days = 0
+        for payment in self.payments.filter(status__in=['PENDING', 'PARTIAL', 'OVERDUE']):
+            if payment.days_overdue > max_days:
+                max_days = payment.days_overdue
+        return max_days
+    
+    @property
+    def total_overdue_amount(self):
+        """Total de dinero vencido (en mora)"""
+        from decimal import Decimal
+        total = Decimal('0')
+        for payment in self.payments.filter(status__in=['OVERDUE', 'PARTIAL']):
+            if payment.days_overdue > 0:
+                total += payment.remaining_total
+        return total
+    
+    def update_status_from_payments(self):
+        """
+        Actualizar estado del crédito basado en el estado de los pagos
+        Reglas:
+        - Balance = 0 → PAID_OFF
+        - Mora >= 30 días → DEFAULTED
+        - Mora 1-29 días → PAST_DUE
+        - Mora 0 días → ACTIVE
+        - DEFAULTED puede volver a ACTIVE solo si está totalmente al día
+        """
+        from datetime import date
+        
+        # Si no hay pagos, no hacer nada
+        if not self.payments.exists():
+            return
+        
+        # REGLA 1: Si balance = 0 → PAID_OFF
+        if self.balance <= 0:
+            if self.status != CreditStatus.PAID_OFF:
+                old_status = self.status
+                self.status = CreditStatus.PAID_OFF
+                self.save(update_fields=['status'])
+                print(f"✓ Credit {self.credit_number}: {old_status} → PAID_OFF")
+            return
+        
+        # Calcular días de mora máximos
+        max_days = self.max_days_overdue
+        
+        # REGLA 2: Si mora >= 30 días → DEFAULTED
+        if max_days >= 30:
+            if self.status != CreditStatus.DEFAULTED:
+                old_status = self.status
+                self.status = CreditStatus.DEFAULTED
+                self.save(update_fields=['status'])
+                print(f"✓ Credit {self.credit_number}: {old_status} → DEFAULTED ({max_days} days overdue)")
+            return
+        
+        # REGLA 3: Si mora 1-29 días → PAST_DUE
+        if max_days > 0:
+            if self.status != CreditStatus.PAST_DUE:
+                old_status = self.status
+                self.status = CreditStatus.PAST_DUE
+                self.save(update_fields=['status'])
+                print(f"✓ Credit {self.credit_number}: {old_status} → PAST_DUE ({max_days} days overdue)")
+            return
+        
+        # REGLA 4: Si mora = 0 días → ACTIVE (incluso si estaba DEFAULTED)
+        if max_days == 0:
+            if self.status not in [CreditStatus.ACTIVE, CreditStatus.PAID_OFF]:
+                old_status = self.status
+                self.status = CreditStatus.ACTIVE
+                self.save(update_fields=['status'])
+                print(f"✓ Credit {self.credit_number}: {old_status} → ACTIVE (now up to date)")
