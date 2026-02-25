@@ -44,7 +44,7 @@ class CreditAdmin(admin.ModelAdmin):
         'created_by',
         'updated_by',
         'payment_breakdown_display',
-        'payments_summary',  # ← ESTE ESTÁ BIEN
+        'payments_summary',
     ]
     
     fieldsets = (
@@ -117,7 +117,7 @@ class CreditAdmin(admin.ModelAdmin):
             ),
             'classes': ('collapse',)
         }),
-        (_('Payment Schedule'), {  # ← NUEVO
+        (_('Payment Schedule'), {
             'fields': ('payments_summary',)
         }),
         (_('Additional'), {
@@ -135,7 +135,19 @@ class CreditAdmin(admin.ModelAdmin):
     )
     
     # ========================================
-    # MÉTODOS (DENTRO DE LA CLASE)
+    # ACCIONES
+    # ========================================
+    
+    actions = [
+        'approve_credits',
+        'reject_credits',
+        'disburse_credits',
+        'regenerate_schedules',
+        'update_statuses',  # ← NUEVO
+    ]
+    
+    # ========================================
+    # MÉTODOS DE VISUALIZACIÓN
     # ========================================
     
     def customer_name(self, obj):
@@ -153,20 +165,30 @@ class CreditAdmin(admin.ModelAdmin):
     def status_badge(self, obj):
         """Display status with color badge"""
         colors = {
-            CreditStatus.PENDING: '#FF9800',
-            CreditStatus.APPROVED: '#4CAF50',
-            CreditStatus.REJECTED: '#F44336',
-            CreditStatus.DISBURSED: '#2196F3',
-            CreditStatus.ACTIVE: '#00BCD4',
-            CreditStatus.PAID: '#8BC34A',
-            CreditStatus.DEFAULTED: '#F44336',
-            CreditStatus.CANCELLED: '#9E9E9E',
+            CreditStatus.PENDING: '#9E9E9E',       # Gris
+            CreditStatus.APPROVED: '#2196F3',      # Azul
+            CreditStatus.REJECTED: '#E91E63',      # Rosa/Rojo
+            CreditStatus.DISBURSED: '#00BCD4',     # Cyan
+            CreditStatus.ACTIVE: '#4CAF50',        # Verde
+            CreditStatus.PAST_DUE: '#FF9800',      # Naranja ⭐ NUEVO
+            CreditStatus.DEFAULTED: '#F44336',     # Rojo
+            CreditStatus.PAID_OFF: '#8BC34A',      # Verde claro
+            CreditStatus.CANCELLED: '#607D8B',     # Gris azulado
         }
         color = colors.get(obj.status, 'gray')
+        
+        # Mostrar días de mora si aplica
+        extra_info = ''
+        if obj.status in [CreditStatus.PAST_DUE, CreditStatus.DEFAULTED]:
+            days = obj.max_days_overdue
+            if days > 0:
+                extra_info = f' ({days}d)'
+        
         return format_html(
-            '<span style="background-color: {}; color: white; padding: 3px 10px; border-radius: 3px;">{}</span>',
+            '<span style="background-color: {}; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}{}</span>',
             color,
-            obj.get_status_display()
+            obj.get_status_display(),
+            extra_info
         )
     status_badge.short_description = _('Status')
     
@@ -227,7 +249,7 @@ class CreditAdmin(admin.ModelAdmin):
         
         paid_count = obj.payments.filter(status='PAID').count()
         pending_count = obj.payments.filter(status='PENDING').count()
-        late_count = obj.payments.filter(status='LATE').count()
+        overdue_count = obj.payments.filter(status='OVERDUE').count()
         
         url = reverse('admin:payments_payment_changelist') + f'?credit__id__exact={obj.id}'
         
@@ -237,14 +259,148 @@ class CreditAdmin(admin.ModelAdmin):
                 <p><strong>Total Payments:</strong> {}</p>
                 <p><strong>Paid:</strong> <span style="color: green;">{}</span></p>
                 <p><strong>Pending:</strong> <span style="color: orange;">{}</span></p>
-                <p><strong>Late:</strong> <span style="color: red;">{}</span></p>
+                <p><strong>Overdue:</strong> <span style="color: red;">{}</span></p>
                 <p><a href="{}" target="_blank" style="color: #0066cc;">→ View all payments</a></p>
             </div>
             """,
             total_payments,
             paid_count,
             pending_count,
-            late_count,
+            overdue_count,
             url
         )
     payments_summary.short_description = _('Payments Summary')
+    
+    # ========================================
+    # MÉTODOS DE ACCIONES
+    # ========================================
+    
+    def approve_credits(self, request, queryset):
+        """Approve selected credits"""
+        from django.utils import timezone
+        
+        pending = queryset.filter(status=CreditStatus.PENDING)
+        
+        if not pending.exists():
+            self.message_user(
+                request,
+                "No pending credits selected",
+                level='WARNING'
+            )
+            return
+        
+        count = pending.update(
+            status=CreditStatus.APPROVED,
+            approved_by=request.user,
+            approval_date=timezone.now()
+        )
+        
+        self.message_user(
+            request,
+            f"Approved {count} credit(s)"
+        )
+    
+    approve_credits.short_description = "Approve selected credits"
+    
+    def reject_credits(self, request, queryset):
+        """Reject selected credits"""
+        from django.utils import timezone
+        
+        pending = queryset.filter(status=CreditStatus.PENDING)
+        
+        if not pending.exists():
+            self.message_user(
+                request,
+                "No pending credits selected",
+                level='WARNING'
+            )
+            return
+        
+        count = pending.update(
+            status=CreditStatus.REJECTED,
+            rejected_by=request.user,
+            rejection_date=timezone.now()
+        )
+        
+        self.message_user(
+            request,
+            f"Rejected {count} credit(s)"
+        )
+    
+    reject_credits.short_description = "Reject selected credits"
+    
+    def disburse_credits(self, request, queryset):
+        """Disburse selected credits"""
+        from datetime import date
+        
+        approved = queryset.filter(status=CreditStatus.APPROVED)
+        
+        if not approved.exists():
+            self.message_user(
+                request,
+                "No approved credits selected",
+                level='WARNING'
+            )
+            return
+        
+        count = 0
+        for credit in approved:
+            if not credit.disbursement_date:
+                credit.disbursement_date = date.today()
+            credit.status = CreditStatus.DISBURSED
+            credit.save()
+            count += 1
+        
+        self.message_user(
+            request,
+            f"Disbursed {count} credit(s)"
+        )
+    
+    disburse_credits.short_description = "Disburse selected credits"
+    
+    def regenerate_schedules(self, request, queryset):
+        """Regenerate payment schedules for selected credits"""
+        count = 0
+        for credit in queryset:
+            if credit.status in [CreditStatus.DISBURSED, CreditStatus.ACTIVE]:
+                credit.regenerate_payment_schedule()
+                count += 1
+        
+        self.message_user(
+            request,
+            f"Regenerated schedules for {count} credit(s)"
+        )
+    
+    regenerate_schedules.short_description = "Regenerate payment schedules"
+    
+    def update_statuses(self, request, queryset):
+        """Actualizar estados de los créditos seleccionados"""
+        count = 0
+        changes = []
+        
+        for credit in queryset:
+            # Solo actualizar si tiene pagos
+            if not credit.payments.exists():
+                continue
+                
+            old_status = credit.status
+            credit.update_status_from_payments()
+            credit.refresh_from_db()
+            
+            if old_status != credit.status:
+                count += 1
+                changes.append(f"{credit.credit_number}: {old_status} → {credit.status}")
+        
+        if count > 0:
+            message = f"Updated status for {count} credit(s)"
+            if count <= 5:  # Mostrar detalles si son pocos
+                message += ":\n" + "\n".join(changes)
+            self.message_user(request, message)
+        else:
+            self.message_user(
+                request,
+                "No status changes needed",
+                level='WARNING'
+            )
+    
+    update_statuses.short_description = "Update credit statuses based on payments"

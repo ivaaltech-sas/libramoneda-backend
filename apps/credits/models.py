@@ -27,7 +27,7 @@ class CreditStatus(models.TextChoices):
     REJECTED = 'REJECTED', _('Rejected')
     DISBURSED = 'DISBURSED', _('Disbursed')
     ACTIVE = 'ACTIVE', _('Active')
-    PAID = 'PAID', _('Paid Off')
+    PAST_DUE = 'PAST_DUE', _('Past Due')
     DEFAULTED = 'DEFAULTED', _('Defaulted')
     PAID_OFF = 'PAID_OFF', _('Paid Off')
     CANCELLED = 'CANCELLED', _('Cancelled')
@@ -636,6 +636,13 @@ class Credit(AuditableModel):
         # Bulk create
         Payment.objects.bulk_create(payments)
         self.update_totals_from_schedule()
+        
+        # DISBURSED → ACTIVE automático
+        if self.status == CreditStatus.DISBURSED:
+            old_status = self.status
+            self.status = CreditStatus.ACTIVE
+            self.save(update_fields=['status'])
+            print(f"✓ Credit {self.credit_number}: {old_status} → ACTIVE (schedule created)")
 
         print(f"✓ Generated {len(payments)} payments")
         print(f"First payment: {fecha_final_1} (deadline: {first_deadline}, {dias_total_1} days)")
@@ -736,6 +743,13 @@ class Credit(AuditableModel):
         # Generate new schedule
         print("Generating new payment schedule...")
         self.generate_payment_schedule()
+        
+        # ⭐ NUEVO: DISBURSED → ACTIVE automático (también al regenerar)
+        if self.status == CreditStatus.DISBURSED:
+            old_status = self.status
+            self.status = CreditStatus.ACTIVE
+            self.save(update_fields=['status'])
+            print(f"✓ Credit {self.credit_number}: {old_status} → ACTIVE (schedule regenerated)")
         
         print(f"✓ Successfully regenerated {self.payments.count()} payments")
         print("=" * 60)
